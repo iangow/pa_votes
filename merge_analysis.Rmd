@@ -1,0 +1,279 @@
+---
+title: "Merge analysis"
+author: "Ian D. Gow"
+date: "07/11/2017"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r db_connect, include=FALSE}
+library(dplyr, warn.conflicts = FALSE)
+library(RPostgreSQL)
+
+Sys.setenv(PGHOST = "iangow.me", PGDATABASE = "crsp")
+pg <- dbConnect(PostgreSQL())
+
+dbGetQuery(pg, "SET work_mem = '5GB'")
+```
+
+## Proxy Insight
+
+```{r pi_data, include=FALSE}
+proposals <- tbl(pg, sql("SELECT * FROM proxy_insight.proposals"))
+meetings <- tbl(pg, sql("SELECT * FROM proxy_insight.meetings"))
+issuer <- tbl(pg, sql("SELECT * FROM proxy_insight.issuer"))
+synth_pva <- tbl(pg, sql("SELECT * FROM proxy_insight.synth_pva"))
+
+pi_merged <-
+    proposals %>%
+    inner_join(meetings) %>%
+    inner_join(issuer) %>%
+    compute()
+
+pi_num_props <- 
+    pi_merged %>% 
+    select(proposal_id) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+
+pi_num_pids <- 
+    pi_merged %>% 
+    select(pid) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+```
+
+For this I first performed an inner join of the `proposals`, `meetings`, and `issuer` tables, which yielded `r prettyNum(pi_num_props, big.mark = ",")` unique proposals (by `proposal_id`) spread out over `r prettyNum(pi_num_pids, big.mark = ",")` companies (by `pid`).
+
+```{r merge_pva, include=FALSE}
+gl_recs <- 
+  synth_pva %>% 
+  filter(pva == "Glass Lewis") %>%
+  select(-pva) %>%
+  rename(gl_rec = final_synth)
+
+iss_recs <- 
+  synth_pva %>% 
+  filter(pva == "ISS") %>%
+  select(-pva) %>%
+  rename(iss_rec = final_synth)
+
+pa_recs <-
+  gl_recs %>%
+  full_join(iss_recs, by="proposal_id")
+
+pi_pva_merged <-
+    pi_merged %>%
+    inner_join(pa_recs) %>%
+    compute()
+
+pi_num_props <- 
+    pi_pva_merged %>% 
+    select(proposal_id) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+
+pi_num_pids <- 
+    pi_pva_merged %>% 
+    select(pid) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+```
+
+I then pulled in the `synth_pva` table, which contains synthetic recommendations from both ISS and GL and found an overlap with the above table of `r prettyNum(pi_num_props, big.mark = ",")` unique proposals (by `proposal_id`) spread out over `r prettyNum(pi_num_pids, big.mark = ",")` companies (by `pid`).
+
+```{r pi_merge_us, include=FALSE}
+pi_merged_us <-
+    pi_pva_merged %>%
+    filter(country_name=="US") %>%
+    compute() 
+  
+pi_num_props <- 
+    pi_merged_us %>%
+    select(proposal_id) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+
+pi_num_pids <- 
+    pi_merged_us %>%
+    select(pid) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+```
+
+ unique proposals (by `proposal_id`) spread out over  companies (by `pid`).
+
+If you filter this by `country_name=="US"`, there is just coverage for `r prettyNum(pi_num_props, big.mark = ",")` proposals spread over `r prettyNum(pi_num_pids, big.mark = ",")` companies. 
+This means proposals where there is a GL rec, an ISS rec, or both.
+
+## WRDS ISS
+
+```{r iss_data, include=FALSE}
+issrec <- tbl(pg, sql("SELECT * FROM risk.issrec"))
+vavoteresults <- tbl(pg, sql("SELECT * FROM risk.vavoteresults"))
+
+iss_merged <-
+    issrec %>%
+    select(meetingid, itemonagendaid, issrec) %>%
+    inner_join(vavoteresults)
+
+iss_num_props <-
+    iss_merged %>%
+    select(meetingdate, itemonagendaid) %>%
+    distinct() %>%
+    count() %>%
+    pull()
+
+iss_num_props_null <-
+    iss_merged %>%
+    filter(is.na(issrec) | issrec == "None") %>%
+    select(meetingdate, itemonagendaid) %>%
+    distinct() %>%
+    count() %>%
+    pull()
+
+iss_num_cos <-
+    iss_merged %>%
+    select(companyid) %>%
+    distinct() %>%
+    count() %>%
+    pull()
+
+iss_merged_us <-
+    iss_merged %>%
+    filter(countryofinc=="USA") %>%
+    compute()
+```
+
+For this I performed an inner join of the `risk.issrec` and `risk.vavoteresults` tables, which yielded `r prettyNum(iss_num_props, big.mark = ",")`  unique proposals (by `meetingdate` and `itemonagendaid` grouped) spread out over `r prettyNum(iss_num_cos, big.mark = ",")`  companies (by `companyid`).
+
+In this cut, there are `r prettyNum(iss_num_props_null, big.mark = ",")` unique proposals where `issrec` was either Null or "None"", leaving `r prettyNum(iss_num_props - iss_num_props_null, big.mark = ",")` unique proposals with ISS recommendations.
+
+```{r data_for_merger, include=FALSE}
+pi_merged_us <-
+    pi_merged %>%
+    left_join(pa_recs) %>%
+    filter(country_name=="US") %>%
+    compute()
+
+pi_num_props <- 
+    pi_merged_us %>% 
+    select(proposal_id) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+
+iss_num_props <-
+  iss_merged_us %>%
+  select(meetingdate, itemonagendaid) %>%
+  distinct() %>%
+  count() %>%
+  pull()
+
+iss_num_cos <-
+  iss_merged_us %>%
+  select(companyid) %>%
+  distinct() %>%
+  count() %>%
+  pull()
+```
+
+If you filter this by `countryofinc=="USA"`, there is coverage for `r prettyNum(iss_num_props, big.mark = ",")`  proposals spread over `r prettyNum(iss_num_cos, big.mark = ",")` companies.
+
+## Merger
+
+I then attempted to merge the PI and ISS datasets together to see how many overlapped. For this, I considered just US companies.
+
+I started with `r prettyNum(pi_num_props, big.mark = ",")` proposals from Proxy Insight (US only). 
+Note that this includes proposals where there is neither a GL rec nor an ISS rec.
+
+I also started with `r prettyNum(iss_num_props, big.mark = ",")` proposals from WRDS ISS (US only). 
+This also includes proposals where there was no ISS rec.
+
+However, when I considered which variables to use to merge the two datasets together, I ran into some issues. The combination of variables that I decided to join on were:
+
+- **Proxy Insight:** `(cusip, meeting_date, proposal_number_orig, proposal_order_row)`
+- **WRDS ISS:** `(cusip, meetingdate, ballotitemnumber, seqnumber)`
+
+```{r count_merge_keys, include=FALSE}
+pi_num_props_ids <- 
+    pi_merged_us %>% 
+    select(cusip, meeting_date, proposal_number_orig, proposal_order_row) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+    
+iss_num_props_ids <- 
+    iss_merged_us %>% 
+    select(cusip, meetingdate, ballotitemnumber, seqnumber) %>%
+    distinct() %>% 
+    count() %>% 
+    pull()
+```
+
+Looking closer, though, I found that:
+
+- **Proxy Insight**: `r prettyNum(pi_num_props, big.mark = ",")` proposals when looking at "proposal_id", but `r prettyNum(pi_num_props_ids, big.mark = ",")` proposals when grouping on the four variables above.
+- **WRDS ISS**: `r prettyNum(iss_num_props, big.mark = ",")` proposals when looking at "meetingdate"+"itemonagendaid" combination, but `r prettyNum(iss_num_props_ids, big.mark = ",")`  proposals when grouping on the four variables above
+In other words, there appears to be duplicate items in each dataset based on those four variables and I am not sure what other common variable to use to distinguish the duplicates.
+
+Despite the duplication, I performed a join of the two datasets on the four variables anyway.
+
+```{r merge_data, include=FALSE}
+pi_iss_merged <- 
+    pi_merged_us %>% 
+    left_join(iss_merged_us, by=c("cusip"="cusip", 
+                                   "meeting_date"="meetingdate",
+                                   "proposal_number_orig"="ballotitemnumber",
+                                   "proposal_order_row"="seqnumber")) %>%
+    compute()
+
+num_rows <- pi_iss_merged %>% count() %>% collect() %>% prettyNum(big.mark = ",")
+```
+
+
+Here I elected to keep all of the Proxy Insight proposals since we will need the `proposal_id` to match up with the investor data later. **Note:** *Not sure what this means.*
+
+The resulting merged table has 225,781 rows where there was a match with WRDS ISS. **Note:** *I get `r num_rows` rows. Not sure what I'm doing that's different.*
+
+```{r pi_by_year}
+pi_merged_us %>% 
+    mutate(year = date_part('year', meeting_date)) %>% 
+    count(year) %>% 
+    arrange(year) %>% 
+    kable()
+```
+
+```{r iss_by_year}
+iss_merged_us %>% 
+    mutate(year = date_part('year', meetingdate)) %>% 
+    count(year) %>% 
+    arrange(year) %>% 
+    kable()
+```
+
+
+**Note:** *I did not go past here.*
+
+However, 904 of the rows are affected by duplicated `proposal_id` values (comprising 448 `proposal_id` values).
+For 146 of these duplicated `proposal_id` rows, it looks like the ISS data is *exactly* the same except for differences in the "meetingid" and "itemonagendaid" variables. 
+This accounts for 73 proposals.
+
+There are another 565 rows where one of the duplicated "proposal_id" rows has the PI-provided "proposal_text" exactly equal to the WRDS ISS provided "itemdesc" so it is safe to assume that the match is good. 
+The other duplicated rows appear to have very different values for those two columns. 
+This accounts for 281 proposals.
+The remaining 193 rows are less clean to deal with. 
+There are rows where the "proposal_text" and "itemdesc" values are very close, but off by one or two letters/words. 
+These can just be evaluated by hand. 
+**Note:** *I don't we want to do anything by "hand", except with some care and with some kind of audit process. 
+This may require more effort than we want to invest.*
